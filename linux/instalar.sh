@@ -17,7 +17,7 @@ fi
 
 mkdir -p "$HOME/.claude/hooks" "$HOME/.local/share/fonts"
 install -m 755 "$aqui/logro-claude.py" "$HOME/.claude/hooks/logro-claude.py"
-install -m 644 "$aqui/PressStart2P-Regular.ttf" "$HOME/.local/share/fonts/"
+install -m 644 "$aqui/../fuente/PressStart2P-Regular.ttf" "$HOME/.local/share/fonts/"
 fc-cache -f "$HOME/.local/share/fonts" 2>/dev/null || true
 
 [ -f "$ajustes" ] || echo '{}' > "$ajustes"
