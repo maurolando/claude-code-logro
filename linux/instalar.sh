@@ -29,6 +29,13 @@ jq --slurpfile nuevo "$aqui/hooks.json" '
       | map(select(any(.hooks[]?; (.command // "") | contains("logro-claude.py")) | not))) + $e.value))
 ' "$ajustes.antes-de-logro" > "$ajustes"
 
+# configuración propia: solo se crea si no existe, para no pisar la de cada uno
+propia="$HOME/.claude/logro.json"
+if [ ! -f "$propia" ]; then
+  printf '{\n  "minimo_s": 30,\n  "sonido": true,\n  "no_molestar": null\n}\n' > "$propia"
+  echo "Configuración creada en $propia (opciones en el README)"
+fi
+
 echo "Instalado. Copia de la configuración anterior: $ajustes.antes-de-logro"
 echo "Reiniciá Claude Code (o abrí /hooks una vez) para que tome los hooks."
 echo '{"cwd":"'"$PWD"'"}' | "$HOME/.claude/hooks/logro-claude.py" || true

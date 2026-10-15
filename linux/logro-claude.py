@@ -10,16 +10,25 @@ por stdin un JSON con el cwd de la sesión. El argumento dice qué pasó:
   pregunta    PreToolUse de AskUserQuestion: muestra un cuadro de opciones.
   respondida  PostToolUse de AskUserQuestion: no muestra nada.
   inicio      UserPromptSubmit: no muestra nada, anota la hora para medir.
+
+Los valores de abajo son los de fábrica: cada uno los cambia en
+~/.claude/logro.json (ver ejemplo-logro.json en el repo), que no se pisa al
+actualizar.
 """
 import json
 import os
+import re
 import subprocess
 import sys
 import time
+from datetime import datetime
 
 MARGEN_SUPERIOR = 40
 ANIMACION_MS = 300
+CONFIG = os.path.expanduser("~/.claude/logro.json")
 SONIDOS = "/usr/share/sounds/ocean/stereo/"
+SONIDO = True  # False silencia todos los avisos
+NO_MOLESTAR = None  # {"desde": "22:00", "hasta": "08:00"}: en ese horario no sale ningún aviso
 PREGUNTA_ABIERTA_MAX_S = 600  # por si la pregunta se cancela y nadie borra la marca
 MINIMO_S = 30  # el trofeo solo sale si la tarea llevó al menos esto; 0 para avisar siempre
 
@@ -172,6 +181,62 @@ def entrada():
     return {}
 
 
+def leer_config():
+    try:
+        with open(CONFIG, encoding="utf-8") as f:
+            config = json.load(f)
+    except OSError:
+        return {}
+    except ValueError as e:
+        print(f"{CONFIG} no es JSON válido, se usan los valores de fábrica: {e}", file=sys.stderr)
+        return {}
+    return config if isinstance(config, dict) else {}
+
+
+def es_color(valor):
+    return isinstance(valor, str) and re.fullmatch(r"#[0-9a-fA-F]{6}", valor) is not None
+
+
+def aplicar_config(config):
+    """Pisa los valores de fábrica con los de ~/.claude/logro.json; lo que no
+    tenga el tipo esperado se ignora."""
+    global MINIMO_S, SONIDO, NO_MOLESTAR, COLOR_TITULO, COLOR_DETALLE
+    if isinstance(config.get("minimo_s"), (int, float)):
+        MINIMO_S = config["minimo_s"]
+    if isinstance(config.get("sonido"), bool):
+        SONIDO = config["sonido"]
+    if "no_molestar" in config and (config["no_molestar"] is None or isinstance(config["no_molestar"], dict)):
+        NO_MOLESTAR = config["no_molestar"]
+    if es_color(config.get("color_titulo")):
+        COLOR_TITULO = config["color_titulo"]
+    if es_color(config.get("color_detalle")):
+        COLOR_DETALLE = config["color_detalle"]
+    avisos = config.get("avisos")
+    for modo, cambios in (avisos.items() if isinstance(avisos, dict) else ()):
+        if modo not in AVISOS or not isinstance(cambios, dict):
+            continue
+        aviso = AVISOS[modo]
+        for clave, tipo in (("activo", bool), ("titulo", str), ("detalle", str), ("visible_ms", int), ("sonido", str)):
+            if isinstance(cambios.get(clave), tipo):
+                aviso[clave] = cambios[clave]
+        colores = cambios.get("colores")
+        if isinstance(colores, list) and len(colores) == 4 and all(map(es_color, colores)):
+            aviso["colores"] = tuple(colores)
+
+
+def en_no_molestar():
+    if not NO_MOLESTAR:
+        return False
+    try:
+        desde, hasta = (datetime.strptime(NO_MOLESTAR[k], "%H:%M").time() for k in ("desde", "hasta"))
+    except (KeyError, TypeError, ValueError):
+        return False
+    ahora = datetime.now().time()
+    if desde <= hasta:
+        return desde <= ahora < hasta
+    return ahora >= desde or ahora < hasta  # cruza la medianoche
+
+
 def marca(cual, datos):
     carpeta = os.environ.get("XDG_RUNTIME_DIR", "/tmp")
     return os.path.join(carpeta, f"claude-logro-{cual}-{datos.get('session_id', '')}")
@@ -241,12 +306,14 @@ def rgb(hexa):
 
 
 def main():
+    aplicar_config(leer_config())
     datos = entrada()
     modo = sys.argv[1] if len(sys.argv) > 1 else "terminado"
     if modo not in AVISOS and modo not in ("inicio", "respondida"):
         modo = "terminado"
+    # las marcas se actualizan aunque el aviso esté apagado o en horario de no molestar
     texto = detalle_del_aviso(modo, datos)
-    if texto is None:
+    if texto is None or not AVISOS[modo].get("activo", True) or en_no_molestar():
         return
     nombre = os.path.basename(str(datos.get("cwd", "")).rstrip("/")) or "Claude Code"
     aviso = AVISOS[modo]
@@ -407,8 +474,9 @@ def main():
     ventana.add_events(Gdk.EventMask.BUTTON_PRESS_MASK)
     ventana.connect("button-press-event", salir)
 
-    sonido = SONIDOS + aviso["sonido"]
-    if aviso["sonido"] and os.path.exists(sonido):
+    # un nombre suelto se busca en SONIDOS; también vale una ruta completa
+    sonido = os.path.join(SONIDOS, os.path.expanduser(aviso["sonido"]))
+    if SONIDO and aviso["sonido"] and os.path.exists(sonido):
         subprocess.Popen(["paplay", sonido], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     GLib.timeout_add(paso_ms, animar, True)

@@ -48,12 +48,29 @@ El instalador agrega seis hooks a `~/.claude/settings.json` sin tocar el resto y
 
 ## Personalizar
 
-En `~/.claude/hooks/logro-claude.py` (Linux) o `logro-claude.ps1` (Windows):
+Cada uno cambia lo suyo en `~/.claude/logro.json` (`%USERPROFILE%\.claude\logro.json` en Windows). Ese archivo no se pisa al actualizar: el instalador solo lo crea si no existe. Todo es opcional; lo que falte o tenga un tipo inválido queda con el valor de fábrica, y si el archivo no es JSON válido se ignora entero.
 
-- Desde cuántos segundos avisa el trofeo: `MINIMO_S` (`$MinimoS` en Windows); `0` para avisar siempre.
-- Textos, duración y sonido de cada aviso: bloque `AVISOS` (`$Avisos` en Windows).
-- Colores: `VERDE` y `ROJO` (fondo, canto claro, canto oscuro y borde) y `COLOR_TITULO`.
-- Íconos: las grillas de 16×16 `TROFEO`, `CANDADO`, `PREGUNTA` y `CALAVERA`.
+| Clave | Qué hace |
+|---|---|
+| `minimo_s` | Desde cuántos segundos de tarea sale el trofeo. `0` para avisar siempre. De fábrica, `30`. |
+| `sonido` | `false` silencia todos los avisos. |
+| `no_molestar` | `{"desde": "22:00", "hasta": "08:00"}`: en ese horario no sale ningún aviso. Puede cruzar la medianoche. `null` lo apaga. |
+| `color_titulo`, `color_detalle` | Color de las dos líneas de texto, en `#rrggbb`. |
+| `avisos` | Cambios por aviso: `terminado`, `permiso`, `pregunta` o `error`. |
+
+Dentro de cada aviso:
+
+| Clave | Qué hace |
+|---|---|
+| `activo` | `false` lo apaga. |
+| `titulo`, `detalle` | Las dos líneas de texto. Al detalle se le suma la duración y la carpeta. |
+| `visible_ms` | Cuánto queda en pantalla, en milisegundos. |
+| `sonido` | Nombre del archivo de sonido o ruta completa. `""` lo silencia. En Linux se busca en `/usr/share/sounds/ocean/stereo/` (`.oga`); en Windows, en `C:\Windows\Media` (`.wav`). |
+| `colores` | Cuatro colores: fondo, canto claro, canto oscuro y borde. |
+
+[`ejemplo-logro.json`](ejemplo-logro.json) tiene todas las claves, con los sonidos de Linux.
+
+Los íconos (las grillas de 16×16 `TROFEO`, `CANDADO`, `PREGUNTA` y `CALAVERA`) se cambian en el script; eso sí se pisa al actualizar.
 
 ## Desinstalar
 

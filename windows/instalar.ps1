@@ -61,6 +61,14 @@ foreach ($evento in $nuevos.Keys) {
 
 [System.IO.File]::WriteAllText($ajustes, ($config | ConvertTo-Json -Depth 50), $utf8)
 
+# configuracion propia: solo se crea si no existe, para no pisar la de cada uno
+$propia = Join-Path (Join-Path $HOME '.claude') 'logro.json'
+if (-not (Test-Path $propia)) {
+    $minima = "{`n  `"minimo_s`": 30,`n  `"sonido`": true,`n  `"no_molestar`": null`n}`n"
+    [System.IO.File]::WriteAllText($propia, $minima, $utf8)
+    Write-Host "Configuracion creada en $propia (opciones en el README)"
+}
+
 Write-Host "Instalado. Copia de la configuracion anterior: $ajustes.antes-de-logro"
 Write-Host 'Reinicia Claude Code (o abri /hooks una vez) para que tome los hooks.'
 try {

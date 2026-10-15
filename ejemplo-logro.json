@@ -1,0 +1,19 @@
+{
+  "minimo_s": 30,
+  "sonido": true,
+  "no_molestar": { "desde": "22:00", "hasta": "08:00" },
+  "color_titulo": "#ffe45c",
+  "color_detalle": "#ffffff",
+  "avisos": {
+    "terminado": {
+      "titulo": "TAREA COMPLETADA",
+      "detalle": "Claude terminó",
+      "visible_ms": 4500,
+      "sonido": "completion-success.oga",
+      "colores": ["#17602c", "#35904a", "#0d401c", "#04140a"]
+    },
+    "permiso": { "activo": true, "visible_ms": 8000 },
+    "pregunta": { "activo": true, "visible_ms": 8000 },
+    "error": { "activo": true, "colores": ["#7a1616", "#b33a3a", "#4f0c0c", "#170404"] }
+  }
+}

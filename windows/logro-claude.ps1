@@ -10,6 +10,10 @@
 #   respondida  PostToolUse de AskUserQuestion: no muestra nada.
 #   inicio      UserPromptSubmit: no muestra nada, anota la hora para medir.
 #
+# Los valores de abajo son los de fabrica: cada uno los cambia en
+# ~/.claude/logro.json (ver ejemplo-logro.json en el repo), que no se pisa al
+# actualizar.
+#
 # Archivo en ASCII puro a proposito: Windows PowerShell 5.1 lee mal los acentos
 # de un .ps1 sin BOM. Los textos que llevan acento se arman con [char].
 param([string]$Modo = 'terminado')
@@ -143,6 +147,69 @@ $Separacion = 5 * $Pixel
 $Interlineado = 3 * $Pixel
 $Sombra = 2 * $Pixel
 
+# --- configuracion propia: ~/.claude/logro.json pisa los valores de fabrica ---
+
+$Config = Join-Path (Join-Path $HOME '.claude') 'logro.json'
+$Sonido = $true  # $false silencia todos los avisos
+$NoMolestar = $null  # {"desde": "22:00", "hasta": "08:00"}: en ese horario no sale ningun aviso
+
+function Tiene($objeto, [string]$clave) {
+    return ($null -ne $objeto) -and ($objeto.PSObject.Properties.Name -contains $clave)
+}
+function EsColor($valor) { return ($valor -is [string]) -and ($valor -match '^#[0-9a-fA-F]{6}$') }
+function Hora($texto) {
+    if (([string]$texto -match '^(\d{1,2}):(\d{2})$') -and ([int]$matches[1] -lt 24) -and ([int]$matches[2] -lt 60)) {
+        return New-TimeSpan -Hours ([int]$matches[1]) -Minutes ([int]$matches[2])
+    }
+    return $null
+}
+function EnNoMolestar {
+    if (-not $NoMolestar) { return $false }
+    $desde = Hora $NoMolestar.desde
+    $hasta = Hora $NoMolestar.hasta
+    if ($null -eq $desde -or $null -eq $hasta) { return $false }
+    $ahora = (Get-Date).TimeOfDay
+    if ($desde -le $hasta) { return ($ahora -ge $desde) -and ($ahora -lt $hasta) }
+    return ($ahora -ge $desde) -or ($ahora -lt $hasta)  # cruza la medianoche
+}
+
+# lo que no tenga el tipo esperado se ignora
+$cfg = $null
+if (Test-Path $Config) {
+    try {
+        $cfg = [System.IO.File]::ReadAllText($Config, (New-Object System.Text.UTF8Encoding($false))) | ConvertFrom-Json
+    } catch {
+        [Console]::Error.WriteLine("$Config no es JSON valido, se usan los valores de fabrica: $_")
+    }
+}
+if ($cfg -is [System.Management.Automation.PSCustomObject]) {
+    if ((Tiene $cfg 'minimo_s') -and (($cfg.minimo_s -is [int]) -or ($cfg.minimo_s -is [long]) -or ($cfg.minimo_s -is [double]))) {
+        $MinimoS = [double]$cfg.minimo_s
+    }
+    if ((Tiene $cfg 'sonido') -and ($cfg.sonido -is [bool])) { $Sonido = $cfg.sonido }
+    if (Tiene $cfg 'no_molestar') { $NoMolestar = $cfg.no_molestar }
+    if (EsColor $cfg.color_titulo) { $ColorTitulo = $cfg.color_titulo }
+    if (EsColor $cfg.color_detalle) { $ColorDetalle = $cfg.color_detalle }
+    if (Tiene $cfg 'avisos') {
+        foreach ($propiedad in $cfg.avisos.PSObject.Properties) {
+            if (-not $Avisos.ContainsKey($propiedad.Name)) { continue }
+            $destino = $Avisos[$propiedad.Name]
+            $cambios = $propiedad.Value
+            if ((Tiene $cambios 'activo') -and ($cambios.activo -is [bool])) { $destino.Activo = $cambios.activo }
+            foreach ($par in @(@('titulo', 'Titulo'), @('detalle', 'Detalle'), @('sonido', 'Sonido'))) {
+                if ((Tiene $cambios $par[0]) -and ($cambios.($par[0]) -is [string])) { $destino[$par[1]] = $cambios.($par[0]) }
+            }
+            if ((Tiene $cambios 'visible_ms') -and (($cambios.visible_ms -is [int]) -or ($cambios.visible_ms -is [long]))) {
+                $destino.VisibleMs = [int]$cambios.visible_ms
+            }
+            if (Tiene $cambios 'colores') {
+                $lista = @($cambios.colores)
+                if (($lista.Count -eq 4) -and -not ($lista | Where-Object { -not (EsColor $_) })) { $destino.Colores = $lista }
+            }
+        }
+    }
+}
+
 # --- entrada del hook ---------------------------------------------------------
 
 $sesion = ''
@@ -214,6 +281,8 @@ if ($Modo -eq 'pregunta') {
 $icono = $aviso.Icono
 $colores = $Verde
 if ($aviso.Colores) { $colores = $aviso.Colores }
+# las marcas ya se actualizaron aunque el aviso este apagado o en horario de no molestar
+if (($aviso.Activo -eq $false) -or (EnNoMolestar)) { exit 0 }
 
 $nombre = 'Claude Code'
 $cwd = $cwd.TrimEnd('\', '/')
@@ -406,8 +475,9 @@ $espera.Add_Tick({ Salir })
 $ventana.Add_MouseLeftButtonDown({ Salir })
 $ventana.Add_Closed({ [System.Windows.Threading.Dispatcher]::CurrentDispatcher.InvokeShutdown() })
 
-if ($aviso.Sonido) {
-    $wav = Join-Path $Sonidos $aviso.Sonido
+if ($Sonido -and $aviso.Sonido) {
+    # un nombre suelto se busca en $Sonidos; tambien vale una ruta completa
+    $wav = [System.IO.Path]::Combine($Sonidos, $aviso.Sonido)
     if (Test-Path $wav) {
         try { (New-Object System.Media.SoundPlayer $wav).Play() } catch { }
     }
