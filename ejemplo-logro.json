@@ -1,19 +1,23 @@
 {
-  "minimo_s": 30,
-  "sonido": true,
-  "no_molestar": { "desde": "22:00", "hasta": "08:00" },
-  "color_titulo": "#ffe45c",
-  "color_detalle": "#ffffff",
-  "avisos": {
-    "terminado": {
-      "titulo": "TAREA COMPLETADA",
-      "detalle": "Claude terminó",
-      "visible_ms": 4500,
-      "sonido": "completion-success.oga",
-      "colores": ["#17602c", "#35904a", "#0d401c", "#04140a"]
-    },
-    "permiso": { "activo": true, "visible_ms": 8000 },
-    "pregunta": { "activo": true, "visible_ms": 8000 },
-    "error": { "activo": true, "colores": ["#7a1616", "#b33a3a", "#4f0c0c", "#170404"] }
-  }
+  // Copialo a ~/.claude/logro.json y dejá solo lo que quieras cambiar.
+  // Se puede escribir sin comillas, con comentarios como este y con comas de más.
+  // Para ver cómo queda: ~/.claude/hooks/logro-claude.py probar
+
+  minimo_s: 30,       // segundos que tiene que durar una tarea para que salga el trofeo; 0 = siempre
+  sonido: true,       // false = sin sonido
+  no_molestar: null,  // o { desde: "22:00", hasta: "08:00" }
+
+  // Un color basta: los cantos y el borde se calculan solos.
+  // Vale #rrggbb, #rgb o un nombre: rojo, verde, azul, celeste, turquesa, amarillo,
+  // dorado, naranja, rosa, violeta, lila, marron, gris, negro, blanco.
+  fondo: verde,       // todos los avisos menos el de error, que queda rojo
+  color_titulo: "#ffe45c",
+  color_detalle: blanco,
+
+  avisos: {
+    terminado: { titulo: "TAREA COMPLETADA", detalle: "Claude terminó", visible_ms: 4500 },
+    permiso:   { activo: true },
+    pregunta:  { activo: true, fondo: azul },
+    error:     { visible_ms: 10000 },
+  },
 }

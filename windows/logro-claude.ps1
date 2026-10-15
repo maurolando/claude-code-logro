@@ -9,6 +9,7 @@
 #   pregunta    PreToolUse de AskUserQuestion: muestra un cuadro de opciones.
 #   respondida  PostToolUse de AskUserQuestion: no muestra nada.
 #   inicio      UserPromptSubmit: no muestra nada, anota la hora para medir.
+#   probar      a mano: muestra los cuatro avisos con la configuracion actual.
 #
 # Los valores de abajo son los de fabrica: cada uno los cambia en
 # ~/.claude/logro.json (ver ejemplo-logro.json en el repo), que no se pisa al
@@ -152,62 +153,234 @@ $Sombra = 2 * $Pixel
 $Config = Join-Path (Join-Path $HOME '.claude') 'logro.json'
 $Sonido = $true  # $false silencia todos los avisos
 $NoMolestar = $null  # {"desde": "22:00", "hasta": "08:00"}: en ese horario no sale ningun aviso
+$Problemas = New-Object System.Collections.ArrayList
+
+$a_ = [char]0xE1  # a con tilde
+$i_ = [char]0xED  # i con tilde
+$u_ = [char]0xFA  # u con tilde
+$NombresColor = @{
+    'rojo' = '#c62828'; 'verde' = '#2e7d32'; 'azul' = '#1565c0'; 'celeste' = '#4fc3f7'
+    'turquesa' = '#00897b'; 'amarillo' = '#fdd835'; 'dorado' = '#ffc107'; 'naranja' = '#ef6c00'
+    'rosa' = '#ec407a'; 'violeta' = '#7b1fa2'; 'morado' = '#7b1fa2'; 'purpura' = '#7b1fa2'
+    'lila' = '#ce93d8'; 'marron' = '#6d4c41'; 'gris' = '#757575'; 'negro' = '#000000'
+    'blanco' = '#ffffff'
+}
+$Claves = @('minimo_s', 'sonido', 'no_molestar', 'fondo', 'color_titulo', 'color_detalle', 'avisos')
+$ClavesAviso = @('activo', 'titulo', 'detalle', 'visible_ms', 'sonido', 'fondo', 'colores')
+
+# Acepta lo que la gente escribe a mano: comentarios // y /* */, comas de mas
+# antes de } o ], y valores sin comillas como #7303fc o azul. Conserva los
+# saltos de linea para que un error siga marcando la linea del archivo.
+$RePalabra = [regex]'\G(?:#?[^\W\d][\w#-]*|#[0-9a-fA-F]+)'
+$ReComaDeMas = [regex]'\G,(?=\s*[}\]])'
+function Recorrer([string]$texto, [scriptblock]$fueraDeTexto) {
+    $salida = New-Object System.Text.StringBuilder
+    $i = 0
+    while ($i -lt $texto.Length) {
+        if ($texto[$i] -eq '"') {
+            $j = $i + 1
+            while (($j -lt $texto.Length) -and ($texto[$j] -ne '"')) {
+                if ($texto[$j] -eq '\') { $j += 2 } else { $j++ }
+            }
+            $fin = [math]::Min($j + 1, $texto.Length)
+            [void]$salida.Append($texto.Substring($i, $fin - $i))
+            $i = $fin
+        } else {
+            $trozo, $i = & $fueraDeTexto $texto $i
+            [void]$salida.Append($trozo)
+        }
+    }
+    return $salida.ToString()
+}
+$ComentariosYPalabras = {
+    param($t, $i)
+    $dos = ''
+    if ($i + 1 -lt $t.Length) { $dos = $t.Substring($i, 2) }
+    if ($dos -eq '//') {
+        $fin = $t.IndexOf("`n", $i)
+        if ($fin -lt 0) { $fin = $t.Length }
+        return '', $fin
+    }
+    if ($dos -eq '/*') {
+        $fin = $t.IndexOf('*/', $i + 2)
+        if ($fin -lt 0) { $fin = $t.Length } else { $fin += 2 }
+        $saltos = ($t.Substring($i, $fin - $i).Split("`n")).Count - 1
+        return ("`n" * $saltos), $fin
+    }
+    $m = $RePalabra.Match($t, $i)
+    if ($m.Success) {
+        if (@('true', 'false', 'null') -ccontains $m.Value) { return $m.Value, ($i + $m.Length) }
+        return ('"' + $m.Value + '"'), ($i + $m.Length)
+    }
+    return [string]$t[$i], ($i + 1)
+}
+$ComasDeMas = {
+    param($t, $i)
+    if ($ReComaDeMas.Match($t, $i).Success) { return '', ($i + 1) }
+    return [string]$t[$i], ($i + 1)
+}
+function RelajarJson([string]$texto) {
+    return Recorrer (Recorrer $texto $ComentariosYPalabras) $ComasDeMas
+}
 
 function Tiene($objeto, [string]$clave) {
-    return ($null -ne $objeto) -and ($objeto.PSObject.Properties.Name -contains $clave)
+    return ($null -ne $objeto) -and ($objeto -is [System.Management.Automation.PSCustomObject]) -and
+        ($objeto.PSObject.Properties.Name -contains $clave)
 }
-function EsColor($valor) { return ($valor -is [string]) -and ($valor -match '^#[0-9a-fA-F]{6}$') }
+function EsNumero($x) { return ($x -is [int]) -or ($x -is [long]) -or ($x -is [double]) -or ($x -is [decimal]) }
+
+# '#7303fc', '7303fc', '#73f' o un nombre ('azul', 'violeta') -> '#rrggbb'
+function NormalizarColor($valor) {
+    if (-not ($valor -is [string])) { return $null }
+    $v = $valor.Trim().ToLowerInvariant().Normalize([System.Text.NormalizationForm]::FormD)
+    $v = -join ($v.ToCharArray() | Where-Object {
+        [System.Globalization.CharUnicodeInfo]::GetUnicodeCategory($_) -ne 'NonSpacingMark' })
+    if ($NombresColor.ContainsKey($v)) { $v = $NombresColor[$v] }
+    $v = $v.TrimStart('#')
+    if ($v -match '^[0-9a-f]{3}$') { $v = -join ($v.ToCharArray() | ForEach-Object { "$_$_" }) }
+    if ($v -match '^[0-9a-f]{6}$') { return "#$v" }
+    return $null
+}
+function Color([string]$clave, $valor) {
+    $normal = NormalizarColor $valor
+    if (-not $normal) { [void]$Problemas.Add("${clave}: color inv${a_}lido") }
+    return $normal
+}
+
+# del color de fondo saca el canto claro, el canto oscuro y el borde
+function Bisel([string]$fondo) {
+    $canales = @(1, 3, 5 | ForEach-Object { [Convert]::ToInt32($fondo.Substring($_, 2), 16) })
+    $tono = {
+        param($factor, $suma)
+        '#' + (-join ($canales | ForEach-Object {
+            '{0:x2}' -f [int][math]::Max(0, [math]::Min(255, [math]::Round($_ * $factor + $suma))) }))
+    }
+    return @($fondo, (& $tono 1.35 22), (& $tono 0.65 0), (& $tono 0.18 0))
+}
+
 function Hora($texto) {
     if (([string]$texto -match '^(\d{1,2}):(\d{2})$') -and ([int]$matches[1] -lt 24) -and ([int]$matches[2] -lt 60)) {
         return New-TimeSpan -Hours ([int]$matches[1]) -Minutes ([int]$matches[2])
     }
     return $null
 }
+function HorarioValido($horario) {
+    return ($null -ne (Hora $horario.desde)) -and ($null -ne (Hora $horario.hasta))
+}
 function EnNoMolestar {
     if (-not $NoMolestar) { return $false }
     $desde = Hora $NoMolestar.desde
     $hasta = Hora $NoMolestar.hasta
-    if ($null -eq $desde -or $null -eq $hasta) { return $false }
     $ahora = (Get-Date).TimeOfDay
     if ($desde -le $hasta) { return ($ahora -ge $desde) -and ($ahora -lt $hasta) }
     return ($ahora -ge $desde) -or ($ahora -lt $hasta)  # cruza la medianoche
 }
 
-# lo que no tenga el tipo esperado se ignora
+# Pisa los valores de fabrica. Lo que no sirva se ignora y queda anotado en
+# $Problemas, para mostrarlo.
 $cfg = $null
 if (Test-Path $Config) {
+    $crudo = [System.IO.File]::ReadAllText($Config, (New-Object System.Text.UTF8Encoding($false)))
     try {
-        $cfg = [System.IO.File]::ReadAllText($Config, (New-Object System.Text.UTF8Encoding($false))) | ConvertFrom-Json
+        $cfg = (RelajarJson $crudo) | ConvertFrom-Json -ErrorAction Stop
+        if (-not ($cfg -is [System.Management.Automation.PSCustomObject])) {
+            [void]$Problemas.Add('tiene que empezar con {')
+            $cfg = $null
+        }
     } catch {
-        [Console]::Error.WriteLine("$Config no es JSON valido, se usan los valores de fabrica: $_")
+        # PowerShell 7 dice la linea; Windows PowerShell 5.1 no
+        if ("$_" -match '[Ll]ine (\d+)') { [void]$Problemas.Add("error en la l${i_}nea $($matches[1])") }
+        else { [void]$Problemas.Add('error de sintaxis') }
     }
 }
-if ($cfg -is [System.Management.Automation.PSCustomObject]) {
-    if ((Tiene $cfg 'minimo_s') -and (($cfg.minimo_s -is [int]) -or ($cfg.minimo_s -is [long]) -or ($cfg.minimo_s -is [double]))) {
-        $MinimoS = [double]$cfg.minimo_s
+if ($cfg) {
+    foreach ($clave in $cfg.PSObject.Properties.Name) {
+        if ($Claves -notcontains $clave) { [void]$Problemas.Add("no existe $clave") }
     }
-    if ((Tiene $cfg 'sonido') -and ($cfg.sonido -is [bool])) { $Sonido = $cfg.sonido }
-    if (Tiene $cfg 'no_molestar') { $NoMolestar = $cfg.no_molestar }
-    if (EsColor $cfg.color_titulo) { $ColorTitulo = $cfg.color_titulo }
-    if (EsColor $cfg.color_detalle) { $ColorDetalle = $cfg.color_detalle }
+    if (Tiene $cfg 'minimo_s') {
+        if (EsNumero $cfg.minimo_s) { $MinimoS = [double]$cfg.minimo_s }
+        else { [void]$Problemas.Add("minimo_s: tiene que ser un n${u_}mero") }
+    }
+    if (Tiene $cfg 'sonido') {
+        if ($cfg.sonido -is [bool]) { $Sonido = $cfg.sonido } else { [void]$Problemas.Add('sonido: true o false') }
+    }
+    if (Tiene $cfg 'no_molestar') {
+        if (($null -eq $cfg.no_molestar) -or (HorarioValido $cfg.no_molestar)) { $NoMolestar = $cfg.no_molestar }
+        else { [void]$Problemas.Add('no_molestar: {"desde": "22:00", "hasta": "08:00"}') }
+    }
+    if (Tiene $cfg 'color_titulo') { $normal = Color 'color_titulo' $cfg.color_titulo; if ($normal) { $ColorTitulo = $normal } }
+    if (Tiene $cfg 'color_detalle') { $normal = Color 'color_detalle' $cfg.color_detalle; if ($normal) { $ColorDetalle = $normal } }
+    if (Tiene $cfg 'fondo') {
+        $normal = Color 'fondo' $cfg.fondo
+        if ($normal) {
+            # el error queda rojo para que se distinga
+            foreach ($nombreAviso in @('terminado', 'permiso', 'pregunta')) { $Avisos[$nombreAviso].Colores = Bisel $normal }
+        }
+    }
     if (Tiene $cfg 'avisos') {
-        foreach ($propiedad in $cfg.avisos.PSObject.Properties) {
-            if (-not $Avisos.ContainsKey($propiedad.Name)) { continue }
-            $destino = $Avisos[$propiedad.Name]
-            $cambios = $propiedad.Value
-            if ((Tiene $cambios 'activo') -and ($cambios.activo -is [bool])) { $destino.Activo = $cambios.activo }
-            foreach ($par in @(@('titulo', 'Titulo'), @('detalle', 'Detalle'), @('sonido', 'Sonido'))) {
-                if ((Tiene $cambios $par[0]) -and ($cambios.($par[0]) -is [string])) { $destino[$par[1]] = $cambios.($par[0]) }
-            }
-            if ((Tiene $cambios 'visible_ms') -and (($cambios.visible_ms -is [int]) -or ($cambios.visible_ms -is [long]))) {
-                $destino.VisibleMs = [int]$cambios.visible_ms
-            }
-            if (Tiene $cambios 'colores') {
-                $lista = @($cambios.colores)
-                if (($lista.Count -eq 4) -and -not ($lista | Where-Object { -not (EsColor $_) })) { $destino.Colores = $lista }
+        if (-not ($cfg.avisos -is [System.Management.Automation.PSCustomObject])) {
+            [void]$Problemas.Add('avisos: tiene que ir entre { }')
+        } else {
+            foreach ($propiedad in $cfg.avisos.PSObject.Properties) {
+                $nombreAviso = $propiedad.Name
+                $cambios = $propiedad.Value
+                if (-not $Avisos.ContainsKey($nombreAviso)) { [void]$Problemas.Add("no existe el aviso $nombreAviso"); continue }
+                if (-not ($cambios -is [System.Management.Automation.PSCustomObject])) {
+                    [void]$Problemas.Add("${nombreAviso}: tiene que ir entre { }"); continue
+                }
+                $destino = $Avisos[$nombreAviso]
+                foreach ($clave in $cambios.PSObject.Properties.Name) {
+                    if ($ClavesAviso -notcontains $clave) { [void]$Problemas.Add("no existe $nombreAviso.$clave") }
+                }
+                if (Tiene $cambios 'activo') {
+                    if ($cambios.activo -is [bool]) { $destino.Activo = $cambios.activo }
+                    else { [void]$Problemas.Add("$nombreAviso.activo: true o false") }
+                }
+                foreach ($par in @(@('titulo', 'Titulo'), @('detalle', 'Detalle'), @('sonido', 'Sonido'))) {
+                    if (Tiene $cambios $par[0]) {
+                        if ($cambios.($par[0]) -is [string]) { $destino[$par[1]] = $cambios.($par[0]) }
+                        else { [void]$Problemas.Add("$nombreAviso.$($par[0]): va entre comillas") }
+                    }
+                }
+                if (Tiene $cambios 'visible_ms') {
+                    if (($cambios.visible_ms -is [int]) -or ($cambios.visible_ms -is [long])) { $destino.VisibleMs = [int]$cambios.visible_ms }
+                    else { [void]$Problemas.Add("$nombreAviso.visible_ms: milisegundos, sin comillas") }
+                }
+                if (Tiene $cambios 'fondo') {
+                    $normal = Color "$nombreAviso.fondo" $cambios.fondo
+                    if ($normal) { $destino.Colores = Bisel $normal }
+                }
+                if (Tiene $cambios 'colores') {
+                    $normales = @(@($cambios.colores) | ForEach-Object { NormalizarColor $_ })
+                    if (($normales.Count -eq 4) -and -not ($normales | Where-Object { -not $_ })) { $destino.Colores = $normales }
+                    else { [void]$Problemas.Add("$nombreAviso.colores: van 4 colores") }
+                }
             }
         }
     }
+}
+foreach ($problema in $Problemas) { [Console]::Error.WriteLine("${Config}: $problema") }
+
+# --- vista previa: logro-claude.ps1 probar -------------------------------------
+
+if ($Modo -eq 'probar') {
+    $existe = ''
+    if (-not (Test-Path $Config)) { $existe = ' (no existe: valores de fabrica)' }
+    Write-Host "Configuracion: $Config$existe"
+    foreach ($problema in $Problemas) { Write-Host "  problema: $problema" }
+    if ($Problemas.Count -eq 0) { Write-Host '  sin problemas' }
+    if (EnNoMolestar) { Write-Host '  ahora es horario de no molestar: fuera de esta prueba no saldria ningun aviso' }
+    $ejecutable = (Get-Process -Id $PID).Path
+    $datos = @{ cwd = (Get-Location).Path } | ConvertTo-Json -Compress
+    $env:LOGRO_PRUEBA = '1'
+    foreach ($nombreAviso in @('terminado', 'permiso', 'pregunta', 'error')) {
+        $cada = $Avisos[$nombreAviso]
+        if ($cada.Activo -eq $false) { Write-Host "${nombreAviso}: apagado"; continue }
+        Write-Host "${nombreAviso}: $($cada.Titulo)"
+        $datos | & $ejecutable -NoProfile -STA -ExecutionPolicy Bypass -File $PSCommandPath $nombreAviso
+    }
+    Remove-Item Env:LOGRO_PRUEBA
+    exit 0
 }
 
 # --- entrada del hook ---------------------------------------------------------
@@ -262,32 +435,41 @@ if ($Modo -eq 'respondida') {
 if (-not $Avisos.ContainsKey($Modo)) { $Modo = 'terminado' }
 $aviso = $Avisos[$Modo]
 $texto = $aviso.Detalle
-if ($Modo -eq 'pregunta') {
-    Tocar (Marca 'pregunta')
-} elseif ($Modo -eq 'permiso') {
-    if ($mensaje -like '*AskUserQuestion*') { exit 0 }
-    $edad = Antiguedad (Marca 'pregunta')
-    if ($null -ne $edad -and $edad -lt $PreguntaAbiertaMaxS) { exit 0 }
-} elseif ($Modo -eq 'error') {
-    if ($Errores.ContainsKey($tipoError)) { $texto = $Errores[$tipoError] }
-} elseif ($Modo -eq 'terminado') {
-    # sin marca (hooks recien instalados) se avisa igual, sin la duracion
-    $edad = Antiguedad (Marca 'inicio')
-    if ($null -ne $edad) {
-        if ($edad -lt $MinimoS) { exit 0 }
-        $texto = "$($aviso.Detalle) en $(Duracion $edad)"
+if ($env:LOGRO_PRUEBA) {
+    # vista previa: sin marcas ni umbral ni horario, y mas corta
+    if ($Modo -eq 'terminado') { $texto = "$($aviso.Detalle) en 4m 12s" }
+    if ($Modo -eq 'error') { $texto = $Errores['rate_limit'] }
+    $aviso.VisibleMs = [math]::Min($aviso.VisibleMs, 2500)
+} else {
+    if ($Modo -eq 'pregunta') {
+        Tocar (Marca 'pregunta')
+    } elseif ($Modo -eq 'permiso') {
+        if ($mensaje -like '*AskUserQuestion*') { exit 0 }
+        $edad = Antiguedad (Marca 'pregunta')
+        if ($null -ne $edad -and $edad -lt $PreguntaAbiertaMaxS) { exit 0 }
+    } elseif ($Modo -eq 'error') {
+        if ($Errores.ContainsKey($tipoError)) { $texto = $Errores[$tipoError] }
+    } elseif ($Modo -eq 'terminado') {
+        # sin marca (hooks recien instalados) se avisa igual, sin la duracion
+        $edad = Antiguedad (Marca 'inicio')
+        if ($null -ne $edad) {
+            if ($edad -lt $MinimoS) { exit 0 }
+            $texto = "$($aviso.Detalle) en $(Duracion $edad)"
+        }
     }
+    # las marcas ya se actualizaron aunque el aviso este apagado o en horario de no molestar
+    if (($aviso.Activo -eq $false) -or (EnNoMolestar)) { exit 0 }
 }
 $icono = $aviso.Icono
 $colores = $Verde
 if ($aviso.Colores) { $colores = $aviso.Colores }
-# las marcas ya se actualizaron aunque el aviso este apagado o en horario de no molestar
-if (($aviso.Activo -eq $false) -or (EnNoMolestar)) { exit 0 }
 
 $nombre = 'Claude Code'
 $cwd = $cwd.TrimEnd('\', '/')
 if ($cwd) { $nombre = ($cwd -split '[\\/]')[-1] }
 $detalle = "$texto $([char]0xB7) $nombre"
+# mientras logro.json tenga algo mal, se avisa ahi en vez del detalle
+if ($Problemas.Count -gt 0) { $detalle = "logro.json: $($Problemas[0])" }
 if ($detalle.Length -gt 40) { $detalle = $detalle.Substring(0, 39) + [char]0x2026 }
 
 # --- dibujo -------------------------------------------------------------------

@@ -10,6 +10,7 @@ por stdin un JSON con el cwd de la sesión. El argumento dice qué pasó:
   pregunta    PreToolUse de AskUserQuestion: muestra un cuadro de opciones.
   respondida  PostToolUse de AskUserQuestion: no muestra nada.
   inicio      UserPromptSubmit: no muestra nada, anota la hora para medir.
+  probar      a mano: muestra los cuatro avisos con la configuración actual.
 
 Los valores de abajo son los de fábrica: cada uno los cambia en
 ~/.claude/logro.json (ver ejemplo-logro.json en el repo), que no se pisa al
@@ -21,6 +22,7 @@ import re
 import subprocess
 import sys
 import time
+import unicodedata
 from datetime import datetime
 
 MARGEN_SUPERIOR = 40
@@ -181,56 +183,188 @@ def entrada():
     return {}
 
 
-def leer_config():
+NOMBRES_COLOR = {
+    "rojo": "#c62828", "verde": "#2e7d32", "azul": "#1565c0", "celeste": "#4fc3f7",
+    "turquesa": "#00897b", "amarillo": "#fdd835", "dorado": "#ffc107", "naranja": "#ef6c00",
+    "rosa": "#ec407a", "violeta": "#7b1fa2", "morado": "#7b1fa2", "purpura": "#7b1fa2",
+    "lila": "#ce93d8", "marron": "#6d4c41", "gris": "#757575", "negro": "#000000",
+    "blanco": "#ffffff",
+}
+CLAVES = {"minimo_s", "sonido", "no_molestar", "fondo", "color_titulo", "color_detalle", "avisos"}
+CLAVES_AVISO = {"activo", "titulo", "detalle", "visible_ms", "sonido", "fondo", "colores"}
+
+
+def relajar_json(texto):
+    """Acepta lo que la gente escribe a mano: comentarios // y /* */, comas de
+    más antes de } o ], y valores sin comillas como #7303fc o azul. Conserva
+    los saltos de línea para que un error siga marcando la línea del archivo."""
+
+    def recorrer(texto, fuera_de_texto):
+        salida, i = [], 0
+        while i < len(texto):
+            if texto[i] == '"':
+                j = i + 1
+                while j < len(texto) and texto[j] != '"':
+                    j += 2 if texto[j] == "\\" else 1
+                salida.append(texto[i : j + 1])
+                i = j + 1
+            else:
+                trozo, i = fuera_de_texto(texto, i)
+                salida.append(trozo)
+        return "".join(salida)
+
+    def comentarios_y_palabras(texto, i):
+        if texto.startswith("//", i):
+            fin = texto.find("\n", i)
+            return "", len(texto) if fin < 0 else fin
+        if texto.startswith("/*", i):
+            fin = texto.find("*/", i + 2)
+            fin = len(texto) if fin < 0 else fin + 2
+            return "\n" * texto.count("\n", i, fin), fin
+        palabra = re.match(r"#?[^\W\d][\w#-]*|#[0-9a-fA-F]+", texto[i:])
+        if palabra:
+            literal = palabra.group() in ("true", "false", "null")
+            return palabra.group() if literal else f'"{palabra.group()}"', i + palabra.end()
+        return texto[i], i + 1
+
+    def comas_de_mas(texto, i):
+        if texto[i] == "," and re.match(r"\s*[}\]]", texto[i + 1 :]):
+            return "", i + 1
+        return texto[i], i + 1
+
+    return recorrer(recorrer(texto, comentarios_y_palabras), comas_de_mas)
+
+
+def leer_config(problemas):
     try:
         with open(CONFIG, encoding="utf-8") as f:
-            config = json.load(f)
+            texto = f.read()
     except OSError:
         return {}
+    try:
+        config = json.loads(relajar_json(texto))
     except ValueError as e:
-        print(f"{CONFIG} no es JSON válido, se usan los valores de fábrica: {e}", file=sys.stderr)
+        problemas.append(f"error en la línea {getattr(e, 'lineno', '?')}")
         return {}
-    return config if isinstance(config, dict) else {}
+    if not isinstance(config, dict):
+        problemas.append("tiene que empezar con {")
+        return {}
+    return config
 
 
-def es_color(valor):
-    return isinstance(valor, str) and re.fullmatch(r"#[0-9a-fA-F]{6}", valor) is not None
+def normalizar_color(valor):
+    """'#7303fc', '7303fc', '#73f' o un nombre ('azul', 'violeta') -> '#rrggbb'."""
+    if not isinstance(valor, str):
+        return None
+    v = "".join(c for c in unicodedata.normalize("NFD", valor.strip().lower()) if not unicodedata.combining(c))
+    v = NOMBRES_COLOR.get(v, v).lstrip("#")
+    if re.fullmatch(r"[0-9a-f]{3}", v):
+        v = "".join(c * 2 for c in v)
+    return "#" + v if re.fullmatch(r"[0-9a-f]{6}", v) else None
 
 
-def aplicar_config(config):
-    """Pisa los valores de fábrica con los de ~/.claude/logro.json; lo que no
-    tenga el tipo esperado se ignora."""
+def bisel(fondo):
+    """Del color de fondo saca el canto claro, el canto oscuro y el borde."""
+    r, g, b = (int(fondo[i : i + 2], 16) for i in (1, 3, 5))
+
+    def a_hex(*canales):
+        return "#" + "".join(f"{max(0, min(255, round(c))):02x}" for c in canales)
+
+    return (
+        fondo,
+        a_hex(r * 1.35 + 22, g * 1.35 + 22, b * 1.35 + 22),
+        a_hex(r * 0.65, g * 0.65, b * 0.65),
+        a_hex(r * 0.18, g * 0.18, b * 0.18),
+    )
+
+
+def aplicar_config(config, problemas):
+    """Pisa los valores de fábrica con los de ~/.claude/logro.json. Lo que no
+    sirva se ignora y queda anotado en problemas, para mostrarlo."""
     global MINIMO_S, SONIDO, NO_MOLESTAR, COLOR_TITULO, COLOR_DETALLE
-    if isinstance(config.get("minimo_s"), (int, float)):
-        MINIMO_S = config["minimo_s"]
-    if isinstance(config.get("sonido"), bool):
-        SONIDO = config["sonido"]
-    if "no_molestar" in config and (config["no_molestar"] is None or isinstance(config["no_molestar"], dict)):
-        NO_MOLESTAR = config["no_molestar"]
-    if es_color(config.get("color_titulo")):
-        COLOR_TITULO = config["color_titulo"]
-    if es_color(config.get("color_detalle")):
-        COLOR_DETALLE = config["color_detalle"]
-    avisos = config.get("avisos")
-    for modo, cambios in (avisos.items() if isinstance(avisos, dict) else ()):
-        if modo not in AVISOS or not isinstance(cambios, dict):
+
+    def color(clave, valor):
+        normal = normalizar_color(valor)
+        if normal is None:
+            problemas.append(f"{clave}: color inválido")
+        return normal
+
+    for clave in config:
+        if clave not in CLAVES:
+            problemas.append(f"no existe {clave}")
+    if "minimo_s" in config:
+        if isinstance(config["minimo_s"], (int, float)) and not isinstance(config["minimo_s"], bool):
+            MINIMO_S = config["minimo_s"]
+        else:
+            problemas.append("minimo_s: tiene que ser un número")
+    if "sonido" in config:
+        if isinstance(config["sonido"], bool):
+            SONIDO = config["sonido"]
+        else:
+            problemas.append("sonido: true o false")
+    if "no_molestar" in config:
+        horario = config["no_molestar"]
+        if horario is None or (isinstance(horario, dict) and horas(horario)):
+            NO_MOLESTAR = horario
+        else:
+            problemas.append('no_molestar: {"desde": "22:00", "hasta": "08:00"}')
+    for clave in ("color_titulo", "color_detalle"):
+        if clave in config and (normal := color(clave, config[clave])):
+            globals()[clave.upper()] = normal
+    if "fondo" in config and (normal := color("fondo", config["fondo"])):
+        for modo, aviso in AVISOS.items():
+            if modo != "error":  # el error queda rojo para que se distinga
+                aviso["colores"] = bisel(normal)
+
+    avisos = config.get("avisos", {})
+    if not isinstance(avisos, dict):
+        problemas.append("avisos: tiene que ir entre { }")
+        avisos = {}
+    for modo, cambios in avisos.items():
+        if modo not in AVISOS:
+            problemas.append(f"no existe el aviso {modo}")
+            continue
+        if not isinstance(cambios, dict):
+            problemas.append(f"{modo}: tiene que ir entre {{ }}")
             continue
         aviso = AVISOS[modo]
-        for clave, tipo in (("activo", bool), ("titulo", str), ("detalle", str), ("visible_ms", int), ("sonido", str)):
-            if isinstance(cambios.get(clave), tipo):
-                aviso[clave] = cambios[clave]
-        colores = cambios.get("colores")
-        if isinstance(colores, list) and len(colores) == 4 and all(map(es_color, colores)):
-            aviso["colores"] = tuple(colores)
+        for clave in cambios:
+            if clave not in CLAVES_AVISO:
+                problemas.append(f"no existe {modo}.{clave}")
+        for clave, tipo, ayuda in (
+            ("activo", bool, "true o false"),
+            ("titulo", str, "va entre comillas"),
+            ("detalle", str, "va entre comillas"),
+            ("visible_ms", int, "milisegundos, sin comillas"),
+            ("sonido", str, "va entre comillas"),
+        ):
+            if clave in cambios:
+                if isinstance(cambios[clave], tipo) and not (tipo is int and isinstance(cambios[clave], bool)):
+                    aviso[clave] = cambios[clave]
+                else:
+                    problemas.append(f"{modo}.{clave}: {ayuda}")
+        if "fondo" in cambios and (normal := color(f"{modo}.fondo", cambios["fondo"])):
+            aviso["colores"] = bisel(normal)
+        if "colores" in cambios:
+            lista = cambios["colores"]
+            normales = [normalizar_color(c) for c in lista] if isinstance(lista, list) else []
+            if len(normales) == 4 and all(normales):
+                aviso["colores"] = tuple(normales)
+            else:
+                problemas.append(f"{modo}.colores: van 4 colores")
+
+
+def horas(horario):
+    try:
+        return tuple(datetime.strptime(str(horario[k]), "%H:%M").time() for k in ("desde", "hasta"))
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 def en_no_molestar():
     if not NO_MOLESTAR:
         return False
-    try:
-        desde, hasta = (datetime.strptime(NO_MOLESTAR[k], "%H:%M").time() for k in ("desde", "hasta"))
-    except (KeyError, TypeError, ValueError):
-        return False
+    desde, hasta = horas(NO_MOLESTAR)
     ahora = datetime.now().time()
     if desde <= hasta:
         return desde <= ahora < hasta
@@ -305,16 +439,50 @@ def rgb(hexa):
     return tuple(int(hexa[i : i + 2], 16) / 255 for i in (1, 3, 5))
 
 
+def probar(problemas):
+    print(f"Configuración: {CONFIG}" + ("" if os.path.exists(CONFIG) else " (no existe: valores de fábrica)"))
+    for problema in problemas:
+        print(f"  problema: {problema}")
+    if not problemas:
+        print("  sin problemas")
+    if en_no_molestar():
+        print("  ahora es horario de no molestar: fuera de esta prueba no saldría ningún aviso")
+    datos = json.dumps({"cwd": os.getcwd()})
+    for modo, aviso in AVISOS.items():
+        if not aviso.get("activo", True):
+            print(f"{modo}: apagado")
+            continue
+        print(f"{modo}: {aviso['titulo']}")
+        subprocess.run(
+            [sys.executable, os.path.abspath(__file__), modo],
+            input=datos, text=True, env={**os.environ, "LOGRO_PRUEBA": "1"},
+        )
+
+
 def main():
-    aplicar_config(leer_config())
-    datos = entrada()
+    problemas = []
+    aplicar_config(leer_config(problemas), problemas)
+    for problema in problemas:
+        print(f"{CONFIG}: {problema}", file=sys.stderr)
     modo = sys.argv[1] if len(sys.argv) > 1 else "terminado"
+    if modo == "probar":
+        probar(problemas)
+        return
+    datos = entrada()
     if modo not in AVISOS and modo not in ("inicio", "respondida"):
         modo = "terminado"
-    # las marcas se actualizan aunque el aviso esté apagado o en horario de no molestar
-    texto = detalle_del_aviso(modo, datos)
-    if texto is None or not AVISOS[modo].get("activo", True) or en_no_molestar():
-        return
+    if os.environ.get("LOGRO_PRUEBA"):
+        # vista previa: sin marcas ni umbral ni horario, y más corta
+        texto = {
+            "terminado": f"{AVISOS[modo]['detalle']} en 4m 12s",
+            "error": ERRORES["rate_limit"],
+        }.get(modo, AVISOS[modo]["detalle"])
+        AVISOS[modo]["visible_ms"] = min(AVISOS[modo]["visible_ms"], 2500)
+    else:
+        # las marcas se actualizan aunque el aviso esté apagado o en horario de no molestar
+        texto = detalle_del_aviso(modo, datos)
+        if texto is None or not AVISOS[modo].get("activo", True) or en_no_molestar():
+            return
     nombre = os.path.basename(str(datos.get("cwd", "")).rstrip("/")) or "Claude Code"
     aviso = AVISOS[modo]
     titulo, icono = aviso["titulo"], aviso["icono"]
@@ -337,6 +505,9 @@ def main():
         return
 
     detalle = f"{texto} · {nombre}"
+    if problemas:
+        # mientras logro.json tenga algo mal, se avisa ahí en vez del detalle
+        detalle = f"logro.json: {problemas[0]}"
     if len(detalle) > 40:
         detalle = detalle[:39] + "…"
 
