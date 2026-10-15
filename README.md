@@ -4,9 +4,10 @@ Avisos tipo "logro" de videojuego para [Claude Code](https://claude.com/claude-c
 
 | Ícono | Cuándo aparece |
 |---|---|
-| Trofeo | Claude terminó de responder |
+| Trofeo | Claude terminó una tarea de al menos 30 s; muestra cuánto tardó ("Claude terminó en 4m 12s") |
 | Candado | Claude espera un permiso (sale unos 6 s después del pedido) |
 | Signo de pregunta | Claude muestra un cuadro de opciones |
+| Calavera (en rojo) | Claude se cortó por un error de la API: límite de uso, API saturada, error del servidor, etc. |
 
 Aparece en el monitor donde está el puntero, se va sola a los pocos segundos y se cierra antes con un clic.
 
@@ -43,15 +44,16 @@ El instalador copia `logro-claude.ps1` y la fuente a `%USERPROFILE%\.claude\hook
 
 ## En los dos sistemas
 
-El instalador agrega cuatro hooks a `~/.claude/settings.json` sin tocar el resto y deja una copia en `settings.json.antes-de-logro`. Se puede correr más de una vez sin duplicar nada. Después hay que reiniciar Claude Code o abrir `/hooks` una vez.
+El instalador agrega seis hooks a `~/.claude/settings.json` sin tocar el resto y deja una copia en `settings.json.antes-de-logro`. Se puede correr más de una vez sin duplicar nada. Después hay que reiniciar Claude Code o abrir `/hooks` una vez.
 
 ## Personalizar
 
 En `~/.claude/hooks/logro-claude.py` (Linux) o `logro-claude.ps1` (Windows):
 
+- Desde cuántos segundos avisa el trofeo: `MINIMO_S` (`$MinimoS` en Windows); `0` para avisar siempre.
 - Textos, duración y sonido de cada aviso: bloque `AVISOS` (`$Avisos` en Windows).
-- Colores: constantes `VERDE`, `VERDE_CLARO`, `VERDE_OSCURO`, `BORDE`, `COLOR_TITULO`.
-- Íconos: las grillas de 16×16 `TROFEO`, `CANDADO` y `PREGUNTA`.
+- Colores: `VERDE` y `ROJO` (fondo, canto claro, canto oscuro y borde) y `COLOR_TITULO`.
+- Íconos: las grillas de 16×16 `TROFEO`, `CANDADO`, `PREGUNTA` y `CALAVERA`.
 
 ## Desinstalar
 

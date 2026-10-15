@@ -35,10 +35,12 @@ function EntradaHook([string]$modo, [string]$filtro) {
 }
 
 $nuevos = [ordered]@{
+    UserPromptSubmit = EntradaHook 'inicio' ''
     Notification = EntradaHook 'permiso' 'permission_prompt'
     PreToolUse   = EntradaHook 'pregunta' 'AskUserQuestion'
     PostToolUse  = EntradaHook 'respondida' 'AskUserQuestion'
     Stop         = EntradaHook '' ''
+    StopFailure  = EntradaHook 'error' ''
 }
 
 if (-not ($config.PSObject.Properties.Name -contains 'hooks') -or -not $config.hooks) {

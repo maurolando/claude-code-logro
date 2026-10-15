@@ -2,10 +2,14 @@
 """Popup tipo "logro" en pixel art, arriba al centro de la pantalla.
 
 Lo disparan los hooks de Claude Code (~/.claude/settings.json), que le pasan
-por stdin un JSON con el cwd de la sesión: Stop sin argumentos (terminó) y
-Notification con el argumento "permiso" (espera un permiso) y PreToolUse de
-AskUserQuestion con el argumento "pregunta" (hace una pregunta); su PostToolUse
-pasa "respondida", que no muestra nada.
+por stdin un JSON con el cwd de la sesión. El argumento dice qué pasó:
+
+  (ninguno)   Stop: terminó. Solo avisa si la tarea llevó al menos MINIMO_S.
+  error       StopFailure: se cortó por un error de la API.
+  permiso     Notification permission_prompt: espera un permiso.
+  pregunta    PreToolUse de AskUserQuestion: muestra un cuadro de opciones.
+  respondida  PostToolUse de AskUserQuestion: no muestra nada.
+  inicio      UserPromptSubmit: no muestra nada, anota la hora para medir.
 """
 import json
 import os
@@ -17,16 +21,16 @@ MARGEN_SUPERIOR = 40
 ANIMACION_MS = 300
 SONIDOS = "/usr/share/sounds/ocean/stereo/"
 PREGUNTA_ABIERTA_MAX_S = 600  # por si la pregunta se cancela y nadie borra la marca
+MINIMO_S = 30  # el trofeo solo sale si la tarea llevó al menos esto; 0 para avisar siempre
 
 # Press Start 2P (~/.local/share/fonts) se ve nítida solo en múltiplos de 8 px
 FUENTE = "Press Start 2P"
 FUENTE_PX = 16
 PIXEL = 4  # tamaño de cada "pixel" del dibujo
 
-VERDE = "#17602c"
-VERDE_CLARO = "#35904a"
-VERDE_OSCURO = "#0d401c"
-BORDE = "#04140a"
+# fondo, canto claro, canto oscuro y borde
+VERDE = ("#17602c", "#35904a", "#0d401c", "#04140a")
+ROJO = ("#7a1616", "#b33a3a", "#4f0c0c", "#170404")
 COLOR_TITULO = "#ffe45c"
 COLOR_DETALLE = "#ffffff"
 
@@ -89,6 +93,25 @@ PREGUNTA = [
     "................",
 ]
 
+CALAVERA = [
+    "................",
+    "................",
+    "................",
+    "....oooooooo....",
+    "...owwwwwwwwo...",
+    "..owwwwwwwwwwo..",
+    "..owooowwooogo..",
+    "..owooowwooogo..",
+    "..owwwwoowwwgo..",
+    "...owwwwwwwgo...",
+    "...owowowowgo...",
+    "....owwwwwgo....",
+    "....oooooooo....",
+    "................",
+    "................",
+    "................",
+]
+
 # sonido: "" para silenciarlo
 AVISOS = {
     "terminado": {
@@ -112,6 +135,23 @@ AVISOS = {
         "visible_ms": 8000,
         "sonido": "message-attention.oga",
     },
+    "error": {
+        "titulo": "CLAUDE SE DETUVO",
+        "detalle": "Error de la API",
+        "icono": CALAVERA,
+        "visible_ms": 10000,
+        "sonido": "dialog-error.oga",
+        "colores": ROJO,
+    },
+}
+
+ERRORES = {
+    "rate_limit": "Límite de uso",
+    "overloaded": "API saturada",
+    "authentication_failed": "Falló el login",
+    "billing_error": "Facturación",
+    "server_error": "Error del servidor",
+    "max_output_tokens": "Respuesta muy larga",
 }
 
 RELLENO = 5 * PIXEL
@@ -132,30 +172,68 @@ def entrada():
     return {}
 
 
-def es_permiso_de_pregunta(modo, datos):
-    """Una pregunta dispara también el aviso de permiso (unos segundos después):
-    mientras esté abierta se deja solo el de pregunta. La marca la pone el
-    PreToolUse de AskUserQuestion y la borra su PostToolUse ("respondida")."""
-    marca = os.path.join(
-        os.environ.get("XDG_RUNTIME_DIR", "/tmp"), f"claude-logro-pregunta-{datos.get('session_id', '')}"
-    )
-    if modo == "pregunta":
-        open(marca, "w").close()
-        return False
+def marca(cual, datos):
+    carpeta = os.environ.get("XDG_RUNTIME_DIR", "/tmp")
+    return os.path.join(carpeta, f"claude-logro-{cual}-{datos.get('session_id', '')}")
+
+
+def tocar(ruta):
+    open(ruta, "w").close()
+
+
+def antiguedad(ruta):
+    try:
+        return time.time() - os.path.getmtime(ruta)
+    except OSError:
+        return None
+
+
+def duracion(segundos):
+    s = int(segundos)
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m {s % 60:02d}s"
+    return f"{s // 3600}h {s % 3600 // 60:02d}m"
+
+
+def detalle_del_aviso(modo, datos):
+    """Texto de la segunda línea, o None si no hay que mostrar nada.
+
+    Una pregunta dispara también el aviso de permiso (unos segundos después):
+    mientras esté abierta se deja solo el de pregunta. Esa marca la pone el
+    PreToolUse de AskUserQuestion y la borra su PostToolUse. La espera de la
+    respuesta no cuenta como tiempo de la tarea: al responder se vuelve a
+    anotar la hora de inicio."""
+    if modo == "inicio":
+        tocar(marca("inicio", datos))
+        return None
     if modo == "respondida":
         try:
-            os.remove(marca)
+            os.remove(marca("pregunta", datos))
         except OSError:
             pass
-        return True
-    if modo != "permiso":
-        return False
-    if "AskUserQuestion" in str(datos.get("message", "")):
-        return True
-    try:
-        return time.time() - os.path.getmtime(marca) < PREGUNTA_ABIERTA_MAX_S
-    except OSError:
-        return False
+        tocar(marca("inicio", datos))
+        return None
+    aviso = AVISOS[modo]
+    if modo == "pregunta":
+        tocar(marca("pregunta", datos))
+    elif modo == "permiso":
+        if "AskUserQuestion" in str(datos.get("message", "")):
+            return None
+        edad = antiguedad(marca("pregunta", datos))
+        if edad is not None and edad < PREGUNTA_ABIERTA_MAX_S:
+            return None
+    elif modo == "error":
+        return ERRORES.get(datos.get("error"), aviso["detalle"])
+    elif modo == "terminado":
+        # sin marca (hooks recién instalados) se avisa igual, sin la duración
+        edad = antiguedad(marca("inicio", datos))
+        if edad is not None:
+            if edad < MINIMO_S:
+                return None
+            return f"{aviso['detalle']} en {duracion(edad)}"
+    return aviso["detalle"]
 
 
 def rgb(hexa):
@@ -165,11 +243,15 @@ def rgb(hexa):
 def main():
     datos = entrada()
     modo = sys.argv[1] if len(sys.argv) > 1 else "terminado"
-    if es_permiso_de_pregunta(modo, datos):
+    if modo not in AVISOS and modo not in ("inicio", "respondida"):
+        modo = "terminado"
+    texto = detalle_del_aviso(modo, datos)
+    if texto is None:
         return
     nombre = os.path.basename(str(datos.get("cwd", "")).rstrip("/")) or "Claude Code"
-    aviso = AVISOS.get(modo, AVISOS["terminado"])
+    aviso = AVISOS[modo]
     titulo, icono = aviso["titulo"], aviso["icono"]
+    fondo, canto_claro, canto_oscuro, borde = aviso.get("colores", VERDE)
     # en Wayland una ventana no puede elegir su posición: se usa XWayland
     os.environ.setdefault("GDK_BACKEND", "x11")
     try:
@@ -184,10 +266,10 @@ def main():
         if not Gtk.init_check()[0]:
             raise RuntimeError("sin display")
     except Exception:
-        subprocess.call(["notify-send", "-a", "Claude Code", aviso["detalle"], nombre])
+        subprocess.call(["notify-send", "-a", "Claude Code", texto, nombre])
         return
 
-    detalle = f"{aviso['detalle']} · {nombre}"
+    detalle = f"{texto} · {nombre}"
     if len(detalle) > 40:
         detalle = detalle[:39] + "…"
 
@@ -240,22 +322,22 @@ def main():
         cr.set_source_rgba(0, 0, 0, 0.45)
         pastilla(cr, SOMBRA, SOMBRA, ancho, alto)
         cr.fill()
-        cr.set_source_rgb(*rgb(BORDE))
+        cr.set_source_rgb(*rgb(borde))
         pastilla(cr, 0, 0, ancho, alto)
         cr.fill()
         # bisel: canto claro arriba, oscuro abajo
         ix, iy, iw, ih = PIXEL, PIXEL, ancho - 2 * PIXEL, alto - 2 * PIXEL
-        cr.set_source_rgb(*rgb(VERDE_CLARO))
+        cr.set_source_rgb(*rgb(canto_claro))
         pastilla(cr, ix, iy, iw, ih)
         cr.fill()
         cr.save()
         pastilla(cr, ix, iy, iw, ih)
         cr.clip()
-        cr.set_source_rgb(*rgb(VERDE_OSCURO))
+        cr.set_source_rgb(*rgb(canto_oscuro))
         pastilla(cr, ix, iy + PIXEL, iw, ih)
         cr.fill()
         cr.restore()
-        cr.set_source_rgb(*rgb(VERDE))
+        cr.set_source_rgb(*rgb(fondo))
         pastilla(cr, ix + PIXEL, iy + PIXEL, iw - 2 * PIXEL, ih - 2 * PIXEL)
         cr.fill()
 
@@ -273,7 +355,7 @@ def main():
         ty = y0 + (lado_icono - (2 * FUENTE_PX + INTERLINEADO)) // 2
         for texto, color, y in ((titulo, COLOR_TITULO, ty), (detalle, COLOR_DETALLE, ty + FUENTE_PX + INTERLINEADO)):
             capa = capa_texto(ctx_pango, texto)
-            for dx, dy, c in ((PIXEL // 2, PIXEL // 2, BORDE), (0, 0, color)):
+            for dx, dy, c in ((PIXEL // 2, PIXEL // 2, borde), (0, 0, color)):
                 cr.set_source_rgb(*rgb(c))
                 cr.move_to(tx + dx, y + dy)
                 PangoCairo.show_layout(cr, capa)

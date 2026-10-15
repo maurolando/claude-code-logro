@@ -1,10 +1,14 @@
 # Aviso tipo "logro" en pixel art, arriba al centro de la pantalla (Windows).
 #
 # Lo disparan los hooks de Claude Code (settings.json), que le pasan por stdin
-# un JSON con el cwd de la sesion: Stop sin argumentos (termino), Notification
-# con "permiso" (espera un permiso), PreToolUse de AskUserQuestion con
-# "pregunta" (hace una pregunta) y su PostToolUse con "respondida", que no
-# muestra nada.
+# un JSON con el cwd de la sesion. El argumento dice que paso:
+#
+#   (ninguno)   Stop: termino. Solo avisa si la tarea llevo al menos $MinimoS.
+#   error       StopFailure: se corto por un error de la API.
+#   permiso     Notification permission_prompt: espera un permiso.
+#   pregunta    PreToolUse de AskUserQuestion: muestra un cuadro de opciones.
+#   respondida  PostToolUse de AskUserQuestion: no muestra nada.
+#   inicio      UserPromptSubmit: no muestra nada, anota la hora para medir.
 #
 # Archivo en ASCII puro a proposito: Windows PowerShell 5.1 lee mal los acentos
 # de un .ps1 sin BOM. Los textos que llevan acento se arman con [char].
@@ -13,6 +17,7 @@ param([string]$Modo = 'terminado')
 $MargenSuperior = 40
 $AnimacionMs = 300
 $PreguntaAbiertaMaxS = 600  # por si la pregunta se cancela y nadie borra la marca
+$MinimoS = 30  # el trofeo solo sale si la tarea llevo al menos esto; 0 para avisar siempre
 $Sonidos = Join-Path $env:WINDIR 'Media'
 
 # Press Start 2P (junto a este script) se ve nitida solo en multiplos de 8 px
@@ -20,10 +25,9 @@ $ArchivoFuente = Join-Path $PSScriptRoot 'PressStart2P-Regular.ttf'
 $FuentePx = 16
 $Pixel = 4  # tamano de cada "pixel" del dibujo
 
-$Verde = '#17602c'
-$VerdeClaro = '#35904a'
-$VerdeOscuro = '#0d401c'
-$Borde = '#04140a'
+# fondo, canto claro, canto oscuro y borde
+$Verde = @('#17602c', '#35904a', '#0d401c', '#04140a')
+$Rojo = @('#7a1616', '#b33a3a', '#4f0c0c', '#170404')
 $ColorTitulo = '#ffe45c'
 $ColorDetalle = '#ffffff'
 
@@ -85,6 +89,24 @@ $Pregunta = @(
     '......ooooo.....',
     '................'
 )
+$Calavera = @(
+    '................',
+    '................',
+    '................',
+    '....oooooooo....',
+    '...owwwwwwwwo...',
+    '..owwwwwwwwwwo..',
+    '..owooowwooogo..',
+    '..owooowwooogo..',
+    '..owwwwoowwwgo..',
+    '...owwwwwwwgo...',
+    '...owowowowgo...',
+    '....owwwwwgo....',
+    '....oooooooo....',
+    '................',
+    '................',
+    '................'
+)
 
 # Sonido: '' para silenciarlo
 $Avisos = @{
@@ -100,6 +122,19 @@ $Avisos = @{
         Titulo = 'PREGUNTA PENDIENTE'; Detalle = 'Claude pregunta'
         Icono = $Pregunta; VisibleMs = 8000; Sonido = 'ding.wav'
     }
+    'error'     = @{
+        Titulo = 'CLAUDE SE DETUVO'; Detalle = 'Error de la API'
+        Icono = $Calavera; VisibleMs = 10000; Sonido = 'Windows Critical Stop.wav'; Colores = $Rojo
+    }
+}
+
+$Errores = @{
+    'rate_limit'            = "L$([char]0xED)mite de uso"
+    'overloaded'            = 'API saturada'
+    'authentication_failed' = "Fall$([char]0xF3) el login"
+    'billing_error'         = "Facturaci$([char]0xF3)n"
+    'server_error'          = 'Error del servidor'
+    'max_output_tokens'     = 'Respuesta muy larga'
 }
 
 $Relleno = 5 * $Pixel
@@ -113,6 +148,7 @@ $Sombra = 2 * $Pixel
 $sesion = ''
 $cwd = ''
 $mensaje = ''
+$tipoError = ''
 try {
     if ([Console]::IsInputRedirected) {
         $utf8 = New-Object System.Text.UTF8Encoding($false)
@@ -123,33 +159,66 @@ try {
             if ($datos.session_id) { $sesion = [string]$datos.session_id }
             if ($datos.cwd) { $cwd = [string]$datos.cwd }
             if ($datos.message) { $mensaje = [string]$datos.message }
+            if ($datos.error) { $tipoError = [string]$datos.error }
         }
     }
 } catch { }
 
-# Una pregunta dispara tambien el aviso de permiso (unos segundos despues):
-# mientras este abierta se deja solo el de pregunta. La marca la pone el
-# PreToolUse de AskUserQuestion y la borra su PostToolUse ("respondida").
-$marca = Join-Path $env:TEMP "claude-logro-pregunta-$sesion"
-if ($Modo -eq 'pregunta') {
-    Set-Content -Path $marca -Value ''
-} elseif ($Modo -eq 'respondida') {
-    Remove-Item -Path $marca -ErrorAction SilentlyContinue
-    exit 0
-} elseif ($Modo -eq 'permiso') {
-    if ($mensaje -like '*AskUserQuestion*') { exit 0 }
-    $archivoMarca = Get-Item -Path $marca -ErrorAction SilentlyContinue
-    if ($archivoMarca -and ((Get-Date) - $archivoMarca.LastWriteTime).TotalSeconds -lt $PreguntaAbiertaMaxS) { exit 0 }
+function Marca([string]$cual) { Join-Path $env:TEMP "claude-logro-$cual-$sesion" }
+function Tocar([string]$ruta) { Set-Content -Path $ruta -Value '' }
+function Antiguedad([string]$ruta) {
+    $archivo = Get-Item -Path $ruta -ErrorAction SilentlyContinue
+    if (-not $archivo) { return $null }
+    return ((Get-Date) - $archivo.LastWriteTime).TotalSeconds
+}
+function Duracion([double]$segundos) {
+    $s = [int][math]::Floor($segundos)
+    if ($s -lt 60) { return "${s}s" }
+    if ($s -lt 3600) { return '{0}m {1:00}s' -f [math]::Floor($s / 60), ($s % 60) }
+    return '{0}h {1:00}m' -f [math]::Floor($s / 3600), [math]::Floor(($s % 3600) / 60)
 }
 
+# Una pregunta dispara tambien el aviso de permiso (unos segundos despues):
+# mientras este abierta se deja solo el de pregunta. Esa marca la pone el
+# PreToolUse de AskUserQuestion y la borra su PostToolUse. La espera de la
+# respuesta no cuenta como tiempo de la tarea: al responder se vuelve a anotar
+# la hora de inicio.
+if ($Modo -eq 'inicio') {
+    Tocar (Marca 'inicio')
+    exit 0
+}
+if ($Modo -eq 'respondida') {
+    Remove-Item -Path (Marca 'pregunta') -ErrorAction SilentlyContinue
+    Tocar (Marca 'inicio')
+    exit 0
+}
 if (-not $Avisos.ContainsKey($Modo)) { $Modo = 'terminado' }
 $aviso = $Avisos[$Modo]
+$texto = $aviso.Detalle
+if ($Modo -eq 'pregunta') {
+    Tocar (Marca 'pregunta')
+} elseif ($Modo -eq 'permiso') {
+    if ($mensaje -like '*AskUserQuestion*') { exit 0 }
+    $edad = Antiguedad (Marca 'pregunta')
+    if ($null -ne $edad -and $edad -lt $PreguntaAbiertaMaxS) { exit 0 }
+} elseif ($Modo -eq 'error') {
+    if ($Errores.ContainsKey($tipoError)) { $texto = $Errores[$tipoError] }
+} elseif ($Modo -eq 'terminado') {
+    # sin marca (hooks recien instalados) se avisa igual, sin la duracion
+    $edad = Antiguedad (Marca 'inicio')
+    if ($null -ne $edad) {
+        if ($edad -lt $MinimoS) { exit 0 }
+        $texto = "$($aviso.Detalle) en $(Duracion $edad)"
+    }
+}
 $icono = $aviso.Icono
+$colores = $Verde
+if ($aviso.Colores) { $colores = $aviso.Colores }
 
 $nombre = 'Claude Code'
 $cwd = $cwd.TrimEnd('\', '/')
 if ($cwd) { $nombre = ($cwd -split '[\\/]')[-1] }
-$detalle = "$($aviso.Detalle) $([char]0xB7) $nombre"
+$detalle = "$texto $([char]0xB7) $nombre"
 if ($detalle.Length -gt 40) { $detalle = $detalle.Substring(0, 39) + [char]0x2026 }
 
 # --- dibujo -------------------------------------------------------------------
@@ -236,20 +305,20 @@ function Pastilla($x, $y, $w, $h, $pincel) {
 }
 
 Pastilla $Sombra $Sombra $ancho $alto (Pincel '#73000000')
-Pastilla 0 0 $ancho $alto (Pincel $Borde)
+Pastilla 0 0 $ancho $alto (Pincel $colores[3])
 # bisel: canto claro arriba, oscuro abajo
 $ix = $Pixel
 $iy = $Pixel
 $iw = $ancho - 2 * $Pixel
 $ih = $alto - 2 * $Pixel
-Pastilla $ix $iy $iw $ih (Pincel $VerdeClaro)
+Pastilla $ix $iy $iw $ih (Pincel $colores[1])
 $huecosInterior = Huecos $ih
-$pincelOscuro = Pincel $VerdeOscuro
+$pincelOscuro = Pincel $colores[2]
 for ($fila = 1; $fila -lt $huecosInterior.Count; $fila++) {
     $hueco = [math]::Max($huecosInterior[$fila], $huecosInterior[$fila - 1])
     Bloque ($ix + $hueco) ($iy + $fila * $Pixel) ($iw - 2 * $hueco) $Pixel $pincelOscuro
 }
-Pastilla ($ix + $Pixel) ($iy + $Pixel) ($iw - 2 * $Pixel) ($ih - 2 * $Pixel) (Pincel $Verde)
+Pastilla ($ix + $Pixel) ($iy + $Pixel) ($iw - 2 * $Pixel) ($ih - 2 * $Pixel) (Pincel $colores[0])
 
 $x0 = $Pixel + $RellenoLateral
 $y0 = $Pixel + $Relleno
@@ -267,10 +336,10 @@ for ($fila = 0; $fila -lt $icono.Count; $fila++) {
 $tx = $x0 + $ladoIcono + $Separacion
 $ty = $y0 + [math]::Floor(($ladoIcono - (2 * $FuentePx + $Interlineado)) / 2)
 $mediaSombra = $Pixel / 2
-Poner (Texto $aviso.Titulo $Borde) ($tx + $mediaSombra) ($ty + $mediaSombra)
+Poner (Texto $aviso.Titulo $colores[3]) ($tx + $mediaSombra) ($ty + $mediaSombra)
 Poner (Texto $aviso.Titulo $ColorTitulo) $tx $ty
 $ty2 = $ty + $FuentePx + $Interlineado
-Poner (Texto $detalle $Borde) ($tx + $mediaSombra) ($ty2 + $mediaSombra)
+Poner (Texto $detalle $colores[3]) ($tx + $mediaSombra) ($ty2 + $mediaSombra)
 Poner (Texto $detalle $ColorDetalle) $tx $ty2
 
 # --- ventana ------------------------------------------------------------------

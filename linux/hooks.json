@@ -1,5 +1,17 @@
 {
   "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/logro-claude.py inicio 2>/dev/null || true",
+            "async": true,
+            "timeout": 15
+          }
+        ]
+      }
+    ],
     "Notification": [
       {
         "matcher": "permission_prompt",
@@ -45,6 +57,18 @@
           {
             "type": "command",
             "command": "~/.claude/hooks/logro-claude.py 2>/dev/null || true",
+            "async": true,
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "StopFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/logro-claude.py error 2>/dev/null || true",
             "async": true,
             "timeout": 15
           }
